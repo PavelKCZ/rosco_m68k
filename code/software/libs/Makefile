@@ -37,6 +37,7 @@ decoy:
 	@echo Please use \"make all\" to build all the libraries.
 
 include src/cstdlib/include.mk
+include src/termios/include.mk
 include src/sdfat/include.mk
 include src/machine/include.mk
 include src/easy68k/include.mk

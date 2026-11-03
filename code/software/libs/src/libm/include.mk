@@ -1,4 +1,4 @@
-SOURCES=$(shell find . -name "*.c")
+SOURCES=$(shell find src/libm -name "*.c")
 LIBOBJECTS=$(SOURCES:%.c=%.o)
 LIB=m
 LIBINCLUDES=$(DIR)/include
