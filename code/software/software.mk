@@ -88,14 +88,17 @@ LDFLAGS+=-z max-page-size=16 -z common-page-size=16
 endif
 
 # Output config (assume name of directory)
-PROGRAM_BASENAME=$(shell basename $(CURDIR))
 
-# Set other output files using output basname
+ifndef PROGRAM_BASENAME
+PROGRAM_BASENAME=$(shell basename $(CURDIR))
+endif
+
 ELF=$(PROGRAM_BASENAME).elf
 BINARY=$(PROGRAM_BASENAME).bin
 DISASM=$(PROGRAM_BASENAME).dis
 MAP=$(PROGRAM_BASENAME).map
 SYM=$(PROGRAM_BASENAME).sym
+
 
 # Assume source files in Makefile directory are source files for project
 CSOURCES=$(wildcard *.c)
