@@ -352,3 +352,46 @@ Do not mark unexecuted tests as successful.
 6. Begin controlled implementation using Codex CLI on Ubuntu.
 
 The guiding principle is to preserve the verified `libtermios 1.0` baseline, reuse the existing MicroSD/FAT facilities, and make small, testable changes.
+
+
+## 11. Aktuální checkpoint po F3-I1 (aktualizováno 2026-11-13)
+
+**Při pokračování po restartu nejprve přečíst [KILO_F3_CHECKPOINT.md](KILO_F3_CHECKPOINT.md)
+a AGENTS.md.** Sekce 10 výše zachovává historický počáteční plán; není aktuálním
+pokynem ke commitu ani zahájení implementace. Také KILO_DEVELOPMENT_CHECKPOINT.md
+zachovává dřívější historii M2.2-A; další krok určuje nový F3 checkpoint.
+
+- Větev `feature/kilo-editor`, HEAD `e2e8db67c6a7da6b66b0be1a8cf51d175189409c`.
+- libtermios 1.0: 78/78 reálných HW testů PASS, stabilní, neměnit.
+- M2.1 dokončen a HW ověřen, commit `b67ae1d`; M2.2-A dokončen,
+  18/18 HW scénářů PASS, commit uvedený výše. B1 změny jsou stále necommitnuté.
+- Potvrzená fyzická RAM: základ 1 MB, rozšíření 5 MB; aktuální testovací deska
+  MC68010 má 5 MB. To neurčuje automaticky RAM dostupnou aplikaci nebo linkeru.
+- M2.2-B1: 64 řádků × 256 ASCII znaků, statická RAM, viewport 23×80,
+  status řádek 24 a warning řádek 25; žádné soubory/FAT/MicroSD ani heap.
+- B1.3b H01–H11: 11/11 PASS na hardware před F3. F1 opravil H07 autorepeat;
+  F1 používá FIFO 512 bajtů a maximálně 16 RX čtení na pumpu.
+- B1-P01: před F3 rychlý PuTTY paste 59/100, Python 5 ms a 2 ms 100/100,
+  Python 1 ms opakovaně 96/100. Ztráta před úspěšným návratem RX do aplikace;
+  bez zjištěného aplikačního overflow. UART overrun není potvrzen.
+- D2 je pod `KILO_RX_DIAGNOSTICS`: Ctrl+R reset, Ctrl+T zmrazený report,
+  Ctrl+Q exit; report označuje započtení Ctrl+T do RX součtu.
+- F3-I1 implementováno: bounded neblokující RX služba během konstrukce rámce,
+  beze změny ANSI obsahu a limitu 2247 bajtů. Host regrese, ASan/UBSan a oba
+  MC68010 buildy PASS. **F3-I1 je hardware-validated: 12/12 scénářů PASS**,
+  potvrzeno uživatelem 2026-11-13 na skutečném rosco_m68k MC68010.
+  Python 2 ms, Python 1 ms ve dvou bězích, rychlý paste v Tera Term i PuTTY,
+  autorepeat obou šipek 10 s, mazání, editace, scrolling a integrita: PASS.
+  Úplný inventář F3-H1a až F3-H5a je v checkpointu; B1 jako celek se tím
+  automaticky neoznačuje za uzavřený.
+- Existující BIN: `code/software/kilo68k/kilo68k.bin` 7988 B a
+  `code/software/kilo68k/kilo68k-rxdiag.bin` 10416 B.
+- Po F3 nebyla v provedených scénářích pozorována ztráta znaků. UART overrun
+  nebyl přímo změřen; F3 nezaručuje bezchybný přenos při libovolném zatížení.
+- Tera Term je nyní preferovaný terminál; DELETE a Ctrl+Q jsou nakonfigurovány
+  na stejné kódy jako v PuTTY. Historické anomálie nepředstavují aktuální
+  nastavení a jejich původní příčina zůstává neurčena.
+- Další krok: vyčkat na výslovné instrukce. Žádný nový test, F2,
+  implementace ani Git publikace nejsou touto dokumentační aktualizací povoleny.
+
+Přesný postup, velikosti, otisky, Git stav a omezení jsou v novém checkpointu.

@@ -18,6 +18,18 @@ The project already includes a custom POSIX-like `libtermios 1.0` library, integ
 
 Read `docs/KILO_PORTING_CONTEXT.md` before making changes related to the Kilo port.
 
+### Resume after restart — current checkpoint
+
+Before any development action, read `docs/KILO_F3_CHECKPOINT.md` as well as
+`docs/KILO_PORTING_CONTEXT.md` and this file. The F3 checkpoint supersedes older
+next-step lists; preserve all uncommitted work. F3-I1 is hardware-validated:
+12/12 scenarios PASS on real MC68010, as reported by the user on 2026-11-13.
+Tera Term is now preferred, with DELETE and Ctrl-Q configured to the same
+codes as PuTTY. UART overrun was not directly measured; the tested results
+do not guarantee lossless transfer under arbitrary load. Wait for explicit
+instructions before further tests, F2, implementation, staging, commit or push.
+
+
 ## Development principles
 
 1. Make small, incremental, reviewable changes.
