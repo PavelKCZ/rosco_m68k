@@ -87,8 +87,8 @@ static int pump_rx(void) {
 
 int terminal_service_rx(void) {
     int failed = 0;
-    /* Called only by the synchronous frame builder, never inside TX or
-     * cleanup. All public successful operations leave timed raw mode. */
+    /* Called by the frame builder and between batch inputs, never inside
+     * TX or cleanup. All public successful operations leave timed raw mode. */
     if (!ready || transport_error) return -1;
     if (tcsetattr(0, TCSANOW, &polling_raw) < 0) failed = 1;
     if (!failed && pump_rx() < 0) failed = 1;
@@ -193,34 +193,24 @@ static int decode(void) {
     return KEY_NONE;
 }
 
-int terminal_read_key(int *key) {
-    unsigned char c;
-    int n;
+static void parser_timeout(void) {
+    if (state == ESCAPE || state == QUIET) state = INPUT;
+    else if (state == CSI || state == SS3) state = DISCARD;
+    /* Incomplete CSI/SS3 stays quarantined until a final byte or ESC. */
+}
+
+static enum terminal_input_result parse_byte(unsigned char c, int *key) {
     *key = KEY_NONE;
-    if (!ready || transport_error) return -1;
-    if (rx_count) {
-        c = rx_fifo[rx_head];
-        rx_head = (rx_head + 1U) % RX_CAPACITY;
-        --rx_count;
-        n = 1;
-    } else {
-        n = rosco_termios_read(0, &c, 1);
-        if (n == 1) { DIAG_COUNT(rx_direct); }
+    if (c == 17) { *key = KEY_QUIT; return TERMINAL_INPUT_EVENT; }
+    if (c == 27) {
+        state = ESCAPE;
+        used = 0;
+        return TERMINAL_INPUT_PROGRESS;
     }
-    if (n < 0 || n > 1) { transport_error = 1; return -1; }
-    if (n == 0) {
-        if (state == ESCAPE || state == QUIET) state = INPUT;
-        else if (state == CSI || state == SS3) state = DISCARD;
-        /* Incomplete CSI/SS3 stays quarantined until a final byte or ESC.
-         * Each call still returns on timeout; there is no waiting loop. */
-        return 0;
-    }
-    if (c == 17) { *key = KEY_QUIT; return 1; }
-    if (c == 27) { state = ESCAPE; used = 0; return 0; }
     if (state == INPUT) {
 #ifdef KILO_RX_DIAGNOSTICS
         /* Raw control events only; command policy belongs to main.c. */
-        if (c == 18 || c == 20) { *key = c; return 1; }
+        if (c == 18 || c == 20) { *key = c; return TERMINAL_INPUT_EVENT; }
 #endif
         if (c == 13) *key = KEY_ENTER; /* Raw CR; LF is always ignored. */
         else if (c == 8 || c == 127) *key = KEY_BACKSPACE;
@@ -241,7 +231,63 @@ int terminal_read_key(int *key) {
             state = DISCARD;
         }
     }
-    return *key == KEY_NONE ? 0 : 1;
+    return *key == KEY_NONE ? TERMINAL_INPUT_PROGRESS : TERMINAL_INPUT_EVENT;
+}
+
+/* The mode flag affects direct RX and EMPTY handling only. FIFO input uses
+ * the same parser without touching termios or counting RX a second time. */
+static enum terminal_input_result read_input(int *key, int polling) {
+    unsigned char c;
+    int n = 0;
+    *key = KEY_NONE;
+    if (!ready || transport_error) return TERMINAL_INPUT_ERROR;
+    if (rx_count) {
+        c = rx_fifo[rx_head];
+        rx_head = (rx_head + 1U) % RX_CAPACITY;
+        --rx_count;
+        n = 1;
+    } else if (polling) {
+        int failed = 0;
+        if (tcsetattr(0, TCSANOW, &polling_raw) < 0) failed = 1;
+        if (!failed) {
+            n = rosco_termios_read(0, &c, 1);
+            if (n == 1) { DIAG_COUNT(rx_direct); }
+            if (n < 0 || n > 1) failed = 1;
+        }
+        /* Never parse a received byte if restoration failed. Keep any
+         * earlier failure even if timed-mode restoration succeeds. */
+        if (tcsetattr(0, TCSANOW, &timed_raw) < 0) failed = 1;
+        if (failed) {
+            transport_error = 1;
+            return TERMINAL_INPUT_ERROR;
+        }
+    } else {
+        n = rosco_termios_read(0, &c, 1);
+        if (n == 1) { DIAG_COUNT(rx_direct); }
+        if (n < 0 || n > 1) {
+            transport_error = 1;
+            return TERMINAL_INPUT_ERROR;
+        }
+    }
+    if (n == 0) {
+        if (!polling) parser_timeout();
+        return TERMINAL_INPUT_EMPTY;
+    }
+    return parse_byte(c, key);
+}
+
+enum terminal_input_result terminal_read_input(int *key) {
+    return read_input(key, 0);
+}
+
+enum terminal_input_result terminal_poll_input(int *key) {
+    return read_input(key, 1);
+}
+
+int terminal_read_key(int *key) {
+    enum terminal_input_result result = terminal_read_input(key);
+    if (result == TERMINAL_INPUT_ERROR) return -1;
+    return result == TERMINAL_INPUT_EVENT ? 1 : 0;
 }
 
 #ifdef KILO_RX_DIAGNOSTICS

@@ -26,6 +26,33 @@ static unsigned char arrivals[2048];
 static int arrival_time[2048];
 static unsigned int arrival_count, arrival_at;
 static int arrival_service[2048], poll_sessions, fail_set_second;
+/* Optional shared stream for direct API tests. -1 is an explicit timed
+ * timeout: polling sees no byte and leaves that marker for the timed read.
+ * Old tests retain their separate timed input / polling-arrival model. */
+static int shared_input, shared_available;
+static unsigned int read_calls, api_poll_sets, api_timed_sets, api_cases;
+enum batch_case {
+    B_SINGLE, B_MULTI, B_130, B_CONTINUOUS, B_PROGRESS,
+    B_ESC_BOUNDARY, B_SS3_BOUNDARY, B_CSI_EMPTY, B_SS3_EMPTY,
+    B_ESC_TIMEOUT, B_UNKNOWN, B_MALFORMED, B_DISCARD, B_QUIET,
+    B_NOOPS, B_MOVES, B_FULL_LINE, B_FULL_DOC, B_QUIT,
+    B_RX_ERROR, B_POLL_ENTRY, B_POLL_RESTORE, B_RENDER_ERROR, B_TX_ERROR,
+    B_OVERFLOW, B_RESET, B_RESET_FIFO, B_RESET_EDIT, B_RESET_DIRTY,
+    B_SNAPSHOT, B_REPORT_ERROR
+};
+static int batch_testing, batch_kind, batch_start, batch_first_end;
+static int batch_target_frames, batch_release, batch_reset_pending;
+static int batch_frames, batch_started, batch_reports, batch_frame_open;
+static int batch_reset_sets, batch_generated, batch_progress_timed;
+static unsigned int batch_prefix, batch_show, batch_report_prefix, batch_cases;
+/* RX02 one-byte releases at successive service opportunities; no clock model. */
+static int batch_stagger, batch_stagger_session;
+static unsigned int batch_stagger_calls;
+static unsigned int batch_render_prefix;
+static int batch_render_failed;
+static void batch_before_rx(int poll);
+static void batch_after_rx(int byte, int poll);
+static void batch_observe_tx(const void *data, unsigned int count);
 static void arrive_service(unsigned char c, int session) {
     assert(arrival_count < sizeof(arrivals));
     arrivals[arrival_count] = c;
@@ -47,6 +74,9 @@ static void reset_io(void) {
     sets = restores = unbinds = 0;
     polling = fail_set = rx_failure = invalid_write = 0;
     poll_sessions = fail_set_second = 0;
+    shared_input = shared_available = 0;
+    read_calls = api_poll_sets = api_timed_sets = 0;
+    batch_testing = 0;
     poll_reads = arrival_count = arrival_at = 0;
     model_output = 0;
     ansi_init(&screen, '#');
@@ -79,6 +109,10 @@ int tcsetattr(int fd, int action, const struct termios *t) {
     }
     assert(t->c_cc[VMIN] == 0 && t->c_cc[VTIME] <= 1);
     assert(t->c_lflag == 0);
+    if (shared_input) {
+        if (t->c_cc[VTIME] == 0) ++api_poll_sets;
+        else ++api_timed_sets;
+    }
     if ((sets == 1 && fault == 3) || sets == fail_set || sets == fail_set_second) return -1;
     polling = t->c_cc[VTIME] == 0;
     if (polling) ++poll_sessions;
@@ -94,6 +128,33 @@ int rosco_termios_unbind(int fd) {
 int rosco_termios_read(int fd, void *data, unsigned int count) {
     int c;
     assert(fd == 0 && count == 1);
+    ++read_calls;
+    if (shared_input) {
+        if (batch_testing) batch_before_rx(polling);
+        if (polling) ++poll_reads;
+        if (rx_failure) return rx_failure;
+        /* Controlled burst after the payload has been received, not parsed.
+         * This is a FIFO overflow stimulus, not a UART timing model. */
+        if (batch_testing && batch_kind == B_OVERFLOW && polling &&
+            input_at == batch_start + 64 && batch_generated < 513) {
+            ++batch_generated;
+            *(unsigned char *)data = 'x';
+            return 1;
+        }
+        if (input_at == shared_available) {
+            assert(polling); /* Timed reads need an explicit timeout marker. */
+            return 0;
+        }
+        c = input[input_at];
+        if (c == -1 && polling) return 0;
+        ++input_at;
+        if (c == -1) return 0;
+        if (c == -2) return -1;
+        assert(c >= 0 && c <= 255);
+        if (batch_testing) batch_after_rx(c, polling);
+        *(unsigned char *)data = (unsigned char)c;
+        return 1;
+    }
     if (polling) {
         ++poll_reads;
         if (rx_failure) return rx_failure;
@@ -114,11 +175,26 @@ int rosco_termios_read(int fd, void *data, unsigned int count) {
 int rosco_termios_write(int fd, const void *data, unsigned int count) {
     assert(fd == 0);
     ++writes;
+    if (batch_testing && batch_kind == B_RENDER_ERROR && batch_frames == 1 &&
+        polling && count == 1 && !batch_render_failed) {
+        static const char prefix[] = "\033[0m\033";
+        /* Production editor_render -> terminal_write sends this frame
+         * prefix in single-byte polling TX. Input polls never write, and
+         * cleanup uses direct writes after restoring timed mode. */
+        assert(input_at == batch_start + 1 && !fail_set && !fail_write);
+        assert(*(const char *)data == prefix[batch_render_prefix]);
+        if (batch_render_prefix == sizeof(prefix) - 2U) {
+            batch_render_failed = 1;
+            return -1; /* Fail inside this renderer's TX, after a complete SGR. */
+        }
+        ++batch_render_prefix;
+    }
     if (writes == fail_write) return -1;
     if (fault == 6) return 0;
     if (invalid_write) return (int)count + 1;
     if (partial && count > (unsigned int)partial) count = (unsigned int)partial;
-    if (model_output) assert(ansi_feed(&screen, data, count) == 0);
+    if (batch_testing) batch_observe_tx(data, count);
+    else if (model_output) assert(ansi_feed(&screen, data, count) == 0);
     /* The screen interpreter streams indefinitely; keep only a bounded
      * recent capture for frame-size/byte checks and legacy diagnostics. */
     assert(count < sizeof(output));
@@ -144,17 +220,11 @@ static void invariants(void) {
     assert(e.diagnostic <= EDITOR_DIAG_DOCUMENT_FULL);
 }
 
-static void render_check(void) {
+static void check_editor_screen(void) {
     static const char warning[] = "RAM ONLY - Ctrl-Q exits immediately and discards all text.";
     char status[80];
     const char *diagnostic;
     int length;
-    output_length = 0;
-    model_output = 1;
-    assert(editor_render(&e) == 0);
-    model_output = 0;
-    assert(output_length <= 2247 && output_length < 4096);
-    if (output_length > largest_frame) largest_frame = output_length;
     /* Compute every expected cell from document coordinates, independently
      * of ANSI serialization and the renderer's clipping/append helpers. */
     memset(expected_screen, ' ', sizeof(expected_screen));
@@ -180,6 +250,16 @@ static void render_check(void) {
     assert(screen.col == (unsigned int)e.cx - e.coloff + 1U);
     assert(screen.visible && !screen.pending_wrap && screen.state == 0 && !screen.error);
     assert(screen.wraps == 0 && screen.scrolls == 0 && screen.bottom_right_writes == 0);
+}
+
+static void render_check(void) {
+    output_length = 0;
+    model_output = 1;
+    assert(editor_render(&e) == 0);
+    model_output = 0;
+    assert(output_length <= 2247 && output_length < 4096);
+    if (output_length > largest_frame) largest_frame = output_length;
+    check_editor_screen();
     assert(!strchr(output, '\n') && !strchr(output, '\r'));
 }
 
@@ -1028,6 +1108,672 @@ static void diagnostic_tests(void) {
 }
 #endif
 
+/* Direct API checks use one explicitly available stream in both RX modes.
+ * No wall-clock model or hardware throughput claim is involved. */
+#define API_NO_BYTE (-3)
+
+static void api_begin(void) {
+    reset_io();
+    assert(terminal_open() == 0);
+#ifdef KILO_RX_DIAGNOSTICS
+    assert(terminal_diag_reset() == 0);
+#endif
+    shared_input = 1;
+    ++api_cases;
+}
+
+static void api_offer(int byte) {
+    assert(input_length < (int)(sizeof(input) / sizeof(*input)));
+    input[input_length++] = byte;
+    shared_available = input_length;
+}
+
+static void api_expect(int poll, int byte, enum terminal_input_result expected,
+                       int expected_key) {
+    int k = -12345, at = input_at, old_writes = writes;
+    unsigned int reads = read_calls;
+    if (byte != API_NO_BYTE) api_offer(byte);
+    enum terminal_input_result result = poll ? terminal_poll_input(&k)
+                                            : terminal_read_input(&k);
+    assert(result == expected);
+    assert(k == (expected == TERMINAL_INPUT_EVENT ? expected_key : KEY_NONE));
+    assert(input_at - at >= 0 && input_at - at <= 1);
+    assert(read_calls - reads <= 1); /* No bulk pump/prefetch through API. */
+    assert(writes == old_writes);    /* Neither input operation transmits. */
+    if (expected != TERMINAL_INPUT_ERROR) assert(!polling);
+}
+
+static void api_end(int failed) {
+    assert(terminal_close(failed) == failed);
+    assert(restores == 1 && unbinds == 1);
+}
+
+#ifdef KILO_RX_DIAGNOSTICS
+static struct terminal_rx_diagnostics api_snapshot;
+static void api_counts(unsigned int direct, unsigned int pump,
+                       unsigned int enqueued, unsigned int peak,
+                       unsigned int pending, unsigned int overflows,
+                       unsigned int failed) {
+    terminal_diag_snapshot(&api_snapshot, 0);
+    assert(api_snapshot.rx_direct == direct && api_snapshot.rx_poll == pump);
+    assert(api_snapshot.enqueued == enqueued && api_snapshot.fifo_peak == peak);
+    assert(api_snapshot.fifo_pending == pending && api_snapshot.overflows == overflows);
+    assert(api_snapshot.transport_error == failed);
+    assert(api_snapshot.delivered == 0 && api_snapshot.accepted == 0);
+    assert(!api_snapshot.saturated && !api_snapshot.ctrl_t_included);
+}
+#define API_COUNTS(...) api_counts(__VA_ARGS__)
+#else
+#define API_COUNTS(...) ((void)0)
+#endif
+
+struct api_step {
+    int poll, byte;
+    enum terminal_input_result result;
+    int key;
+};
+#define AP(b, r, k) {1, b, TERMINAL_INPUT_##r, k}
+#define AT(b, r, k) {0, b, TERMINAL_INPUT_##r, k}
+
+static void api_sequence(const struct api_step *steps, unsigned int count) {
+    unsigned int direct = 0;
+    api_begin();
+    for (unsigned int i = 0; i < count; ++i) {
+        api_expect(steps[i].poll, steps[i].byte, steps[i].result, steps[i].key);
+        if (steps[i].byte >= 0) ++direct;
+    }
+    /* direct is also used in non-diagnostic builds. */
+    assert((unsigned int)input_at >= direct);
+    API_COUNTS(direct, 0, 0, 0, 0, 0, 0);
+    api_end(0);
+}
+#define API_SEQUENCE(a) api_sequence(a, sizeof(a) / sizeof(*(a)))
+
+static void api_timed_and_poll_tests(void) {
+    static const struct api_step timed[] = {
+        AT(-1, EMPTY, KEY_NONE), AT('a', EVENT, 'a'),
+        AT(27, PROGRESS, KEY_NONE), AT(-1, EMPTY, KEY_NONE),
+        AT('[', EVENT, '['), AT('A', EVENT, 'A')
+    };
+    API_SEQUENCE(timed); /* Original late-ESC limitation is preserved. */
+    static const struct api_step poll[] = {
+        AP(API_NO_BYTE, EMPTY, KEY_NONE), AP('a', EVENT, 'a'),
+        AP(27, PROGRESS, KEY_NONE), AP(API_NO_BYTE, EMPTY, KEY_NONE),
+        AP('[', PROGRESS, KEY_NONE), AP(API_NO_BYTE, EMPTY, KEY_NONE),
+        AP('A', EVENT, KEY_UP)
+    };
+    API_SEQUENCE(poll);
+
+    /* More bytes may exist, but they are not available until released. */
+    api_begin(); input[input_length++] = 'x';
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EMPTY, KEY_NONE);
+    assert(input_at == 0 && api_poll_sets == 1 && api_timed_sets == 1);
+    shared_available = input_length;
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'x');
+    assert(input_at == 1 && api_poll_sets == 2 && api_timed_sets == 2);
+    API_COUNTS(1, 0, 0, 0, 0, 0, 0); api_end(0);
+
+    /* An EMPTY poll cannot consume the explicit timeout of a later timed
+     * read. Only that timed read resets the pending ESC. */
+    static const struct api_step timeout[] = {
+        AP(27, PROGRESS, KEY_NONE), AP(-1, EMPTY, KEY_NONE),
+        AT(API_NO_BYTE, EMPTY, KEY_NONE), AP('x', EVENT, 'x')
+    };
+    API_SEQUENCE(timeout);
+
+    api_begin(); api_offer('a'); api_offer('b'); api_offer('c');
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'a');
+    assert(input_at == 1 && read_calls == 1);
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'b');
+    assert(input_at == 2 && read_calls == 2);
+    api_expect(0, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'c');
+    assert(input_at == 3 && read_calls == 3);
+    assert(api_poll_sets == 2 && api_timed_sets == 2);
+    API_COUNTS(3, 0, 0, 0, 0, 0, 0); api_end(0);
+
+    /* Shared RX source: F3 enqueues f/g, while d remains directly available.
+     * Both timed and polling APIs must prefer the queued bytes. */
+    api_begin(); api_offer('f'); api_offer('g');
+    assert(terminal_service_rx() == 0 && input_at == 2);
+    api_offer('d');
+    int old_sets = sets;
+    unsigned int reads = read_calls;
+    api_expect(0, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'f');
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'g');
+    assert(sets == old_sets && read_calls == reads && input_at == 2);
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'd');
+    assert(sets == old_sets + 2 && read_calls == reads + 1);
+    API_COUNTS(1, 2, 2, 2, 0, 0, 0); api_end(0);
+}
+
+static void api_parser_tests(void) {
+    for (unsigned int family = 0; family < 2; ++family) {
+        int intro = family ? 'O' : '[';
+        int final = family ? 'H' : 'A';
+        int event = family ? KEY_HOME : KEY_UP;
+        api_begin();
+        api_expect(0, 27, TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EMPTY, KEY_NONE);
+        api_expect(1, intro, TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EMPTY, KEY_NONE);
+        api_expect(1, final, TERMINAL_INPUT_EVENT, event);
+        API_COUNTS(3, 0, 0, 0, 0, 0, 0); api_end(0);
+
+        api_begin();
+        api_expect(1, 27, TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        api_expect(0, intro, TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        api_expect(0, -1, TERMINAL_INPUT_EMPTY, KEY_NONE);
+        api_expect(1, final, TERMINAL_INPUT_PROGRESS, KEY_NONE); /* DISCARD. */
+        api_expect(1, 'x', TERMINAL_INPUT_EVENT, 'x');
+        API_COUNTS(4, 0, 0, 0, 0, 0, 0); api_end(0);
+    }
+    static const struct api_step unknown[] = {
+        AP(27, PROGRESS, KEY_NONE), AP('[', PROGRESS, KEY_NONE),
+        AP('9', PROGRESS, KEY_NONE), AP('~', PROGRESS, KEY_NONE),
+        AP('x', EVENT, 'x')
+    };
+    API_SEQUENCE(unknown);
+    static const struct api_step malformed[] = {
+        AP(27, PROGRESS, KEY_NONE), AP('[', PROGRESS, KEY_NONE),
+        AP(1, PROGRESS, KEY_NONE), AP(API_NO_BYTE, EMPTY, KEY_NONE),
+        AT(-1, EMPTY, KEY_NONE), AP('A', PROGRESS, KEY_NONE),
+        AP('b', EVENT, 'b')
+    };
+    API_SEQUENCE(malformed);
+    static const struct api_step quiet[] = {
+        AP(27, PROGRESS, KEY_NONE), AP(']', PROGRESS, KEY_NONE),
+        AP('a', PROGRESS, KEY_NONE), AP(API_NO_BYTE, EMPTY, KEY_NONE),
+        AP('b', PROGRESS, KEY_NONE), AT(-1, EMPTY, KEY_NONE), AP('x', EVENT, 'x')
+    };
+    API_SEQUENCE(quiet);
+    static const struct api_step consecutive[] = {
+        AP(27, PROGRESS, KEY_NONE), AP('[', PROGRESS, KEY_NONE), AP('A', EVENT, KEY_UP),
+        AP(27, PROGRESS, KEY_NONE), AP('[', PROGRESS, KEY_NONE), AP('B', EVENT, KEY_DOWN),
+        AP(27, PROGRESS, KEY_NONE), AP(27, PROGRESS, KEY_NONE),
+        AP('[', PROGRESS, KEY_NONE), AP('D', EVENT, KEY_LEFT)
+    };
+    API_SEQUENCE(consecutive);
+    static const struct api_step legacy_limit[] = {
+        AP(27, PROGRESS, KEY_NONE), AP('[', PROGRESS, KEY_NONE),
+        AP('[', PROGRESS, KEY_NONE), AP('A', EVENT, 'A')
+    };
+    API_SEQUENCE(legacy_limit);
+    api_begin();
+    api_expect(1, 27, TERMINAL_INPUT_PROGRESS, KEY_NONE);
+    api_expect(1, '[', TERMINAL_INPUT_PROGRESS, KEY_NONE);
+    for (int i = 0; i < 17; ++i)
+        api_expect(1, '1', TERMINAL_INPUT_PROGRESS, KEY_NONE);
+    api_expect(1, '~', TERMINAL_INPUT_PROGRESS, KEY_NONE);
+    api_expect(1, 'x', TERMINAL_INPUT_EVENT, 'x');
+    API_COUNTS(21, 0, 0, 0, 0, 0, 0); api_end(0);
+
+    /* Quit in every parser state; R/T only in INPUT in diagnostic builds.
+     * Quit does not reset the parser, matching the original implementation. */
+    const int prefixes[][3] = {{0,0,0},{27,0,0},{27,'[',0},
+                             {27,'O',0},{27,'[',1},{27,']',0}};
+    const unsigned int lengths[] = {0,1,2,2,3,2};
+    for (unsigned int i = 0; i < 6; ++i) {
+        api_begin();
+        for (unsigned int j = 0; j < lengths[i]; ++j)
+            api_expect(1, prefixes[i][j], TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        api_expect(1, 17, TERMINAL_INPUT_EVENT, KEY_QUIT);
+        for (int c = 18; c <= 20; c += 2) {
+#ifdef KILO_RX_DIAGNOSTICS
+            if (i == 0) api_expect(1, c, TERMINAL_INPUT_EVENT, c);
+            else
+#endif
+                api_expect(1, c, TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        }
+        api_expect(0, -1, TERMINAL_INPUT_EMPTY, KEY_NONE);
+        if (i >= 2 && i <= 4)
+            api_expect(1, '~', TERMINAL_INPUT_PROGRESS, KEY_NONE);
+        api_expect(1, 'x', TERMINAL_INPUT_EVENT, 'x');
+        API_COUNTS(lengths[i] + 4U + (i >= 2 && i <= 4), 0, 0, 0, 0, 0, 0);
+        api_end(0);
+    }
+}
+
+static void api_latched(void) {
+    unsigned int reads = read_calls;
+    int old_sets = sets, at = input_at, k = -12345;
+    api_expect(0, API_NO_BYTE, TERMINAL_INPUT_ERROR, KEY_NONE);
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_ERROR, KEY_NONE);
+    assert(terminal_read_key(&k) == -1 && k == KEY_NONE);
+    assert(read_calls == reads && sets == old_sets && input_at == at);
+}
+
+static void api_error_and_wrapper_tests(void) {
+    for (int failure = 0; failure < 8; ++failure) {
+        api_begin();
+        if (failure == 0) api_offer(-2); /* Timed RX failure. */
+        if (failure == 1 || failure == 6) fail_set = sets + 1;
+        if (failure >= 3 && failure <= 5) fail_set = sets + 2;
+        if (failure == 2) api_offer(-2); /* Polling RX failure. */
+        if (failure == 4) api_offer('x');
+        if (failure == 5) api_offer(27); /* Must not change parser on restore error. */
+        if (failure == 6) fail_set_second = sets + 2;
+        if (failure == 7) rx_failure = 2; /* Invalid RX count. */
+        api_expect(failure != 0, API_NO_BYTE, TERMINAL_INPUT_ERROR, KEY_NONE);
+        if (failure == 0) assert(api_poll_sets == 0 && api_timed_sets == 0);
+        else assert(api_poll_sets == 1 && api_timed_sets == 1);
+        if (failure == 1 || failure == 6) assert(read_calls == 0);
+        else assert(read_calls == 1);
+        api_latched();
+        API_COUNTS(failure == 4 || failure == 5, 0, 0, 0, 0, 0, 1);
+#ifdef KILO_RX_DIAGNOSTICS
+        assert(api_snapshot.parser_state == 0); /* In particular, failed ESC restore. */
+#endif
+        api_end(1);
+    }
+
+    /* F1 enqueues at the exact boundary; new APIs must not double-count
+     * dequeues or poll past queued data, even with fresh RX available. */
+    api_begin(); shared_input = 0;
+    for (int i = 0; i < 512; ++i) arrive('a', 0);
+    assert(terminal_write("abcdefghijklmnopqrstuvwxyz0123456789", 36) == 0);
+    shared_input = 1; api_offer('z');
+    int old_sets = sets;
+    unsigned int reads = read_calls;
+    for (int i = 0; i < 512; ++i)
+        api_expect(i % 2, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'a');
+    assert(sets == old_sets && read_calls == reads && input_at == 0);
+    api_expect(1, API_NO_BYTE, TERMINAL_INPUT_EVENT, 'z');
+    API_COUNTS(1, 512, 512, 512, 0, 0, 0); api_end(0);
+
+    api_begin(); shared_input = 0;
+    for (int i = 0; i < 513; ++i) arrive('a', 0);
+    assert(terminal_write("abcdefghijklmnopqrstuvwxyz0123456789", 36) == -1);
+    api_latched();
+    API_COUNTS(0, 513, 512, 512, 512, 1, 1); api_end(1);
+
+    api_begin();
+    const int bytes[] = {-1,27,'[','A','x',-2};
+    const int results[] = {0,0,0,1,1,-1};
+    const int keys[] = {KEY_NONE,KEY_NONE,KEY_NONE,KEY_UP,'x',KEY_NONE};
+    for (unsigned int i = 0; i < sizeof(bytes) / sizeof(*bytes); ++i) {
+        int k = -12345;
+        api_offer(bytes[i]);
+        assert(terminal_read_key(&k) == results[i] && k == keys[i]);
+    }
+    api_latched();
+    API_COUNTS(4, 0, 0, 0, 0, 0, 1); api_end(1);
+}
+
+static void input_api_tests(void) {
+    api_timed_and_poll_tests();
+    api_parser_tests();
+    api_error_and_wrapper_tests();
+    printf("PASS F2-I1a direct input API: %u cases; timed/poll/FIFO/parser, mode errors, latch, wrapper and diagnostic accounting\n", api_cases);
+}
+
+static void batch_add(int byte) {
+    assert(input_length < (int)(sizeof(input) / sizeof(*input)));
+    input[input_length++] = byte;
+}
+
+static void batch_arrow(int intro, int final) {
+    batch_add(27); batch_add(intro); batch_add(final);
+}
+
+static void batch_before_rx(int poll) {
+    if (!poll && batch_stagger && batch_kind == B_PROGRESS &&
+        input_at == shared_available && shared_available < batch_first_end)
+        ++shared_available; /* Next bounded progress batch starts with data. */
+    if (poll && batch_stagger && !batch_reset_pending &&
+        input_at >= batch_start + 1 && shared_available < batch_first_end &&
+        batch_stagger_session != poll_sessions) {
+        batch_stagger_session = poll_sessions;
+        ++shared_available;
+        ++batch_stagger_calls;
+    }
+    if (!poll && batch_reset_pending) {
+        if (input_at == 0) shared_available = 1; /* Ctrl-R alone. */
+        else {
+            assert(input_at == batch_start && sets == batch_reset_sets);
+            shared_available = batch_stagger ? batch_start + 1 : batch_first_end;
+            batch_reset_pending = batch_release = 0;
+        }
+    } else if (!poll && batch_release) {
+        shared_available = batch_stagger ? batch_start + 1 : batch_first_end;
+        batch_release = 0;
+    }
+    if (!poll && !batch_reset_pending &&
+        (batch_kind == B_ESC_TIMEOUT || batch_kind == B_DISCARD || batch_kind == B_QUIET) &&
+        input_at == batch_first_end && shared_available == batch_first_end)
+        shared_available = input_length - 1; /* Explicit timeout + continuation. */
+    if (!poll && batch_kind == B_PROGRESS && input_at >= batch_start) {
+        assert(input_at - batch_start == 64 * batch_progress_timed);
+        ++batch_progress_timed;
+    }
+}
+
+static void batch_after_rx(int byte, int poll) {
+    if (batch_reset_pending && input_at == batch_start && byte == 18)
+        batch_reset_sets = sets;
+    if (!poll && input_at == batch_start + 1) {
+        if (batch_kind == B_POLL_ENTRY) fail_set = sets + 1;
+        if (batch_kind == B_POLL_RESTORE) fail_set = sets + 2;
+        if (batch_kind == B_TX_ERROR || batch_kind == B_REPORT_ERROR)
+            fail_write = writes + 1;
+    }
+}
+
+static void batch_model_key(int k) {
+    assert(editor_key(&e, k) >= 0);
+    invariants();
+}
+
+static void batch_frame_complete(void) {
+    unsigned int count = 0;
+    editor_init(&e); /* Independent expected editor fixture; not main's document. */
+    if (batch_frames > 1) {
+        switch (batch_kind) {
+        case B_SINGLE: batch_model_key('a'); break;
+        case B_MULTI:
+            batch_model_key('a'); batch_model_key('b'); batch_model_key('c'); break;
+        case B_130: case B_CONTINUOUS:
+            count = (unsigned int)(batch_frames - 1) * 64U;
+            if (count > (batch_kind == B_130 ? 130U : 192U))
+                count = batch_kind == B_130 ? 130U : 192U;
+            for (unsigned int i = 0; i < count; ++i) batch_model_key('0' + i % 10);
+            break;
+        case B_ESC_BOUNDARY: case B_SS3_BOUNDARY:
+            for (unsigned int i = 0; i < 63; ++i) batch_model_key('a');
+            if (batch_frames == 3) batch_model_key(KEY_LEFT);
+            break;
+        case B_CSI_EMPTY: case B_SS3_EMPTY: case B_MOVES:
+            batch_model_key('a'); batch_model_key('b'); batch_model_key('c');
+            if (batch_kind == B_MOVES || batch_frames == 3) batch_model_key(KEY_LEFT);
+            break;
+        case B_MALFORMED: batch_model_key('b'); break;
+        case B_FULL_LINE:
+            count = (unsigned int)(batch_frames - 1) * 64U;
+            if (count > 256) count = 256;
+            for (unsigned int i = 0; i < count; ++i) batch_model_key('a');
+            if (batch_frames == 6) batch_model_key('X');
+            break;
+        case B_FULL_DOC:
+            for (unsigned int i = 0; i < 64; ++i) batch_model_key(KEY_ENTER);
+            break;
+        case B_RESET_EDIT: break; /* a, Backspace => empty, still dirty. */
+        case B_RESET_DIRTY:
+            batch_model_key('a');
+            if (batch_frames == 3) batch_model_key('b');
+            break;
+        default: batch_model_key('x'); break;
+        }
+    }
+    check_editor_screen(); /* Every cell, cursor and pending wrap checked. */
+    assert(batch_frames <= batch_target_frames);
+    if (batch_frames == 2 &&
+        (batch_kind == B_ESC_BOUNDARY || batch_kind == B_SS3_BOUNDARY))
+        shared_available = batch_start + 66;
+    if (batch_frames == 2 &&
+        (batch_kind == B_CSI_EMPTY || batch_kind == B_SS3_EMPTY))
+        shared_available = batch_start + 6;
+    if (batch_frames == 2 && batch_kind == B_RESET_DIRTY)
+        shared_available = batch_start + 3;
+    if (batch_frames > 1 && batch_frames == batch_target_frames)
+        shared_available = input_length; /* Quit only after dirty is displayed. */
+}
+
+static void batch_observe_tx(const void *data, unsigned int count) {
+    static const char begin[] = "\033[0m\033[?25l";
+    static const char show[] = "\033[?25h";
+    static const char report[] = "\033[0m\033[2J";
+    const char *p = data;
+    for (unsigned int i = 0; i < count; ++i) {
+        char c = p[i];
+        assert(ansi_feed(&screen, &c, 1) == 0);
+        batch_prefix = c == begin[batch_prefix] ? batch_prefix + 1U : (c == 27 ? 1U : 0U);
+        if (batch_prefix == sizeof(begin) - 1U) {
+            batch_prefix = 0;
+            assert(!batch_frame_open);
+            batch_frame_open = 1;
+            ++batch_started;
+        }
+        batch_report_prefix = c == report[batch_report_prefix] ? batch_report_prefix + 1U
+                                                             : (c == 27 ? 1U : 0U);
+        if (batch_report_prefix == sizeof(report) - 1U) {
+            batch_report_prefix = 0;
+            assert(!batch_frame_open);
+            ++batch_reports;
+        }
+        batch_show = c == show[batch_show] ? batch_show + 1U : (c == 27 ? 1U : 0U);
+        if (batch_show == sizeof(show) - 1U) {
+            batch_show = 0;
+            if (batch_frame_open) {
+                batch_frame_open = 0;
+                ++batch_frames;
+                batch_frame_complete();
+            }
+        }
+    }
+}
+
+static void batch_prepare(enum batch_case kind) {
+    reset_io();
+    shared_input = batch_testing = 1;
+    batch_kind = kind;
+    batch_frames = batch_started = batch_reports = batch_frame_open = 0;
+    batch_prefix = batch_show = batch_report_prefix = 0;
+    batch_reset_sets = batch_generated = batch_progress_timed = 0;
+    batch_stagger = batch_stagger_session = 0;
+    batch_stagger_calls = 0;
+    batch_render_prefix = 0;
+    batch_render_failed = 0;
+    batch_start = batch_reset_pending = 0;
+    batch_release = 1;
+    batch_target_frames = 2;
+    ++batch_cases;
+#ifdef KILO_RX_DIAGNOSTICS
+    if (kind != B_RESET_FIFO) {
+        batch_add(18);
+        batch_start = batch_reset_pending = 1;
+    }
+#endif
+    switch (kind) {
+    case B_SINGLE: batch_add('a'); break;
+    case B_MULTI: batch_add('a'); batch_add('b'); batch_add('c'); break;
+    case B_130: case B_CONTINUOUS:
+        for (int i = 0; i < (kind == B_130 ? 130 : 192); ++i) batch_add('0' + i % 10);
+        batch_target_frames = 4;
+        break;
+    case B_PROGRESS:
+        for (int i = 0; i < 128; ++i) batch_add(10);
+        batch_target_frames = 1;
+        break;
+    case B_ESC_BOUNDARY: case B_SS3_BOUNDARY:
+        for (int i = 0; i < 63; ++i) batch_add('a');
+        batch_arrow(kind == B_ESC_BOUNDARY ? '[' : 'O', 'D');
+        batch_target_frames = 3;
+        break;
+    case B_CSI_EMPTY: case B_SS3_EMPTY:
+        batch_add('a'); batch_add('b'); batch_add('c');
+        batch_arrow(kind == B_CSI_EMPTY ? '[' : 'O', 'D');
+        batch_target_frames = 3;
+        break;
+    case B_ESC_TIMEOUT: batch_add(27); batch_add(-1); batch_add('x'); break;
+    case B_UNKNOWN: batch_arrow('[', '9'); batch_add('~'); batch_add('x'); break;
+    case B_MALFORMED: batch_arrow('[', 1); batch_add('A'); batch_add('b'); break;
+    case B_DISCARD: batch_arrow('[', -1); batch_add('A'); batch_add('x'); break;
+    case B_QUIET:
+        batch_add(27); batch_add(']'); batch_add('a'); batch_add('b');
+        batch_add(-1); batch_add('x'); break;
+    case B_NOOPS:
+        batch_arrow('[', 'D'); batch_arrow('[', 'H');
+        batch_arrow('[', 'A'); batch_arrow('[', 'B');
+        batch_target_frames = 1; break;
+    case B_MOVES:
+        batch_add('a'); batch_add('b'); batch_add('c');
+        batch_arrow('[', 'D'); batch_arrow('[', 'D'); batch_arrow('[', 'C'); break;
+    case B_FULL_LINE:
+        for (int i = 0; i < 256; ++i) batch_add('a');
+        batch_add('X'); batch_add('X'); batch_add('X');
+        batch_target_frames = 6; break;
+    case B_FULL_DOC:
+        for (int i = 0; i < 65; ++i) batch_add(13);
+        break;
+    case B_QUIT:
+        batch_add('a'); batch_add('b'); batch_add(17); batch_add('z');
+        batch_target_frames = 1; break;
+    case B_RX_ERROR: batch_add('a'); batch_add(-2); batch_target_frames = 1; break;
+    case B_POLL_ENTRY: case B_POLL_RESTORE:
+        batch_add('a'); batch_add('b'); batch_target_frames = 1; break;
+    case B_RENDER_ERROR: case B_TX_ERROR:
+        batch_add('a'); batch_target_frames = 1; break;
+    case B_OVERFLOW:
+        for (int i = 0; i < 64; ++i) batch_add('a');
+        batch_target_frames = 1; break;
+    case B_RESET: batch_add('x'); batch_add(20); batch_target_frames = 1; break;
+    case B_RESET_FIFO: batch_add(18); batch_add('x'); break;
+    case B_RESET_EDIT: batch_add('a'); batch_add(8); batch_add(18); break;
+    case B_RESET_DIRTY: batch_add('a'); batch_add(18); batch_add('b');
+        batch_target_frames = 3; break;
+    case B_SNAPSHOT:
+        batch_add('a'); batch_add('b'); batch_add('c'); batch_add(20);
+        batch_add('z'); batch_add(20); batch_target_frames = 1; break;
+    case B_REPORT_ERROR:
+        batch_add('a'); batch_add(20); batch_target_frames = 1; break;
+    }
+    int error = (kind >= B_RX_ERROR && kind <= B_OVERFLOW) || kind == B_REPORT_ERROR;
+    if (!error && kind != B_QUIT) batch_add(17);
+    batch_first_end = input_length - (!error && kind != B_QUIT ? 1 : 0);
+    if (kind == B_PROGRESS || kind == B_NOOPS || kind == B_SNAPSHOT || kind == B_RESET)
+        batch_first_end = input_length; /* Quit/report is part of this stream. */
+    if (kind == B_ESC_BOUNDARY || kind == B_SS3_BOUNDARY || kind == B_FULL_DOC)
+        batch_first_end = batch_start + 64;
+    if (kind == B_CSI_EMPTY || kind == B_SS3_EMPTY) batch_first_end = batch_start + 5;
+    if (kind == B_ESC_TIMEOUT) batch_first_end = batch_start + 1;
+    if (kind == B_DISCARD) batch_first_end = batch_start + 2;
+    if (kind == B_QUIET) batch_first_end = batch_start + 4;
+    if (kind == B_FULL_LINE) batch_first_end = batch_start + 258;
+    if (kind == B_RESET_DIRTY) batch_first_end = batch_start + 2;
+    if (kind == B_RESET_FIFO) {
+        batch_release = 0;
+        shared_available = 2; /* F3 queues R/x before main handles Ctrl-R. */
+    }
+}
+
+static void batch_run(enum batch_case kind) {
+    batch_prepare(kind);
+    int failed = (kind >= B_RX_ERROR && kind <= B_OVERFLOW) || kind == B_REPORT_ERROR;
+    assert(kmain() == failed);
+    assert(batch_frames == batch_target_frames && batch_started == batch_target_frames);
+    assert(!batch_frame_open && !screen.error && screen.visible);
+    assert(restores == 1 && unbinds == 1);
+    if (kind == B_RENDER_ERROR) {
+        assert(batch_render_failed && batch_render_prefix == 4);
+        assert(batch_frames == 1 && batch_started == 1 && !batch_frame_open);
+        puts("PASS B_RENDER_ERROR: subsequent editor frame reached TX, injected failure and cleanup verified");
+    }
+    if (kind == B_PROGRESS) assert(batch_progress_timed >= 1);
+    /* z may be prefetched, but must not be dispatched after Ctrl-Q. */
+    if (kind == B_QUIT) assert(input_at >= batch_start + 3);
+    if (kind == B_OVERFLOW) assert(batch_generated > 0 && batch_generated <= 513);
+    if (failed && kind != B_REPORT_ERROR) assert(batch_reports == 0);
+#ifdef KILO_RX_DIAGNOSTICS
+    static struct terminal_rx_diagnostics result;
+    terminal_diag_snapshot(&result, 0);
+    if (kind == B_130) {
+        assert(result.delivered == 130 && result.accepted == 130);
+        assert(result.rx_direct + result.rx_poll == 131);
+        assert(result.enqueued == result.rx_poll && result.fifo_peak <= 512);
+        assert(result.fifo_pending == 0 && !result.overflows && !result.transport_error);
+    }
+    if (kind == B_QUIT || kind == B_RX_ERROR || kind == B_POLL_ENTRY ||
+        kind == B_POLL_RESTORE || kind == B_RENDER_ERROR || kind == B_TX_ERROR) {
+        unsigned int n = kind == B_QUIT ? 2U : 1U;
+        assert(result.delivered == n && result.accepted == n);
+    }
+    if (kind == B_OVERFLOW) {
+        /* Services interleave enqueue and dequeue, so overflow can occur
+         * before the 64-byte boundary. Check conservation, not old timing. */
+        assert(result.delivered > 0 && result.delivered < 64);
+        assert(result.accepted == result.delivered && result.rx_direct == 1);
+        assert(result.rx_poll == 63U + (unsigned int)batch_generated);
+        assert(result.rx_poll == result.enqueued + 1 && result.overflows == 1);
+        assert(result.enqueued == 512U + result.delivered - 1U);
+        assert(result.fifo_peak == 512 && result.transport_error);
+    }
+    if (kind == B_FULL_LINE) assert(result.delivered == 259 && result.accepted == 256);
+    if (kind == B_RESET || kind == B_SNAPSHOT || kind == B_REPORT_ERROR) {
+        unsigned int n = kind == B_SNAPSHOT ? 3U : 1U;
+        assert(result.delivered == n && result.accepted == n);
+        /* RX counts include bytes prefetched beyond Ctrl-T, while delivered
+         * and accepted stop at the frozen snapshot command boundary. */
+        unsigned int trailing = kind == B_SNAPSHOT ? 3U : kind == B_RESET ? 1U : 0U;
+        assert(result.rx_direct + result.rx_poll == n + 1U + trailing);
+        assert(result.fifo_pending == trailing && result.ctrl_t_included);
+        if (kind != B_REPORT_ERROR) {
+            assert(batch_reports == (kind == B_SNAPSHOT ? 2 : 1));
+            assert(strstr(output, kind == B_SNAPSHOT ? "Row length: 0000000003"
+                                                   : "Row length: 0000000001"));
+        }
+    }
+    if (kind == B_RESET_FIFO || kind == B_RESET_EDIT)
+        assert(result.delivered == 0 && result.accepted == 0);
+    if (kind == B_RESET_DIRTY) assert(result.delivered == 2 && result.accepted == 2);
+#endif
+    batch_testing = 0;
+}
+
+static void batching_tests(void) {
+    for (int kind = B_SINGLE; kind <= B_OVERFLOW; ++kind)
+        batch_run((enum batch_case)kind);
+#ifdef KILO_RX_DIAGNOSTICS
+    for (int kind = B_RESET; kind <= B_REPORT_ERROR; ++kind)
+        batch_run((enum batch_case)kind);
+#endif
+    printf("PASS F2 batching: %u scenarios; raw 64-byte boundaries, coalesced frames, ordered events/barriers, full screen, errors and FIFO\n", batch_cases);
+}
+
+static void batch_rx_tests(void) {
+    static const enum batch_case cases[] = {
+        B_MULTI, B_MOVES, B_NOOPS, B_130, B_CONTINUOUS, B_PROGRESS
+    };
+    for (unsigned int i = 0; i < sizeof(cases) / sizeof(*cases); ++i) {
+        batch_prepare(cases[i]);
+        batch_stagger = 1;
+        assert(kmain() == 0);
+        assert(batch_frames == batch_target_frames && !screen.error && screen.visible);
+        assert(batch_stagger_calls > 0 && restores == 1 && unbinds == 1);
+        batch_testing = 0;
+    }
+    /* A failed service after a dirty event must never transmit that frame. */
+    for (int failure = 0; failure < 3; ++failure) {
+        batch_prepare(B_RX_ERROR);
+        /* Entry/restore failures and a read error in the newly added service. */
+        if (failure == 0) batch_kind = B_POLL_ENTRY;
+        if (failure == 1) batch_kind = B_POLL_RESTORE;
+        assert(kmain() == 1);
+        assert(batch_frames == 1 && batch_started == 1 && !screen.error);
+        assert(restores == 1 && unbinds == 1 && screen.visible);
+        batch_testing = 0;
+    }
+#ifdef KILO_RX_DIAGNOSTICS
+    /* LF leaves an empty document, then service prefetches R/x/T/Q. R must
+     * reject reset because FIFO contains trailing data; never flush it. */
+    batch_prepare(B_RESET);
+    input_length = batch_start;
+    batch_add(10); batch_add(18); batch_add('x'); batch_add(20); batch_add(17);
+    batch_first_end = input_length;
+    assert(kmain() == 0 && batch_frames == 1 && batch_reports == 1);
+    static struct terminal_rx_diagnostics result;
+    terminal_diag_snapshot(&result, 0);
+    assert(result.rx_direct + result.rx_poll == 5);
+    assert(result.delivered == 1 && result.accepted == 1);
+    /* main adds document fields to its report copy, not terminal's frozen counters. */
+    assert(strstr(output, "Row length: 0000000001"));
+    assert(result.fifo_pending == 1 && result.ctrl_t_included);
+    assert(!result.overflows && !result.transport_error);
+    assert(restores == 1 && unbinds == 1 && screen.visible && !screen.error);
+    batch_testing = 0;
+    puts("PASS RX02 D2: prefetched Ctrl-R rejected with empty document and trailing FIFO input");
+#endif
+    puts("PASS RX02: 6 staged-arrival streams and 3 batch-service failures; ordered input, coalescing and cleanup");
+}
+
 int main(void) {
     reset_io(); assert(terminal_open() == 0); interpreter_tests();
     split_tests(); editing_tests(); navigation_tests();
@@ -1036,6 +1782,9 @@ int main(void) {
 #ifdef KILO_RX_DIAGNOSTICS
     diagnostic_tests();
 #endif
+    input_api_tests();
+    batching_tests();
+    batch_rx_tests();
     printf("Host sizeof(row)=%zu sizeof(editor)=%zu (not target ABI measurements)\n",
            sizeof(struct editor_row), sizeof(struct editor));
     printf("Largest complete production frame observed: %u bytes (bound 2247, capacity 4096)\n", largest_frame);
