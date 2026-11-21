@@ -1,0 +1,17 @@
+{
+  "head": "9881e9e0f53ba5888887eaa91ddc982521ea8e89",
+  "sources": {
+    "code/software/libs/src/sdfat/include/sdfat.h": "6b9dbedc98fe42dff08e83bd64656da0f174502d4c509b609d5edb3b8515e70c",
+    "code/software/libs/src/sdfat/sdcard_asm.S": "a90bcf58625e732aedf1cb89264b6355765525bb39442c6b56dd1f5ace59affa",
+    "code/software/libs/src/sdfat/sdcard.c": "a165579cb961852f3c810e974f5966a5d5639416502cc5a0dab5bf41261a5265",
+    "code/software/libs/src/sdfat/sdcard.o": "3eb5773f8865bd97b124f9d1b3660f7968b7806773a776c8b991b97edffd6399",
+    "code/firmware/rosco_m68k_firmware/stage1/blockdev/include/bbsd.h": "0cb00ef74d468132a185fb1d1c57228e08b8fbbdf9b75c51f1abc7ca03490b27",
+    "code/firmware/rosco_m68k_firmware/stage1/blockdev/bbsd.c": "eda906f120f2df60043b793b7fde17290d563673e43e6f32ec652af46816f49a",
+    "code/firmware/rosco_m68k_firmware/stage1/blockdev/syscalls_asm.asm": "460e97ea6fc4f88c63c3cea121fcae7f00374b803835ca5c779bc9e7fbdaa129",
+    "code/firmware/rosco_m68k_firmware/stage1/blockdev/include.mk": "d254e19303208ddd5b5049d155f9526f14cd693407f40dcbb90af2ad93c45ffd",
+    "code/firmware/rosco_m68k_firmware/InterfaceReference.md": "830e9ecc9552803662118fa77a2838ed6baf393426c050218a0bac9260346d67"
+  },
+  "descriptor_evidence": "existing-sdcard-dwarf.txt: MC68010 object compiled GCC13.3.1; size22 initialized@0 type32@2 reserved[4]@6; copied public layout via aligned raw bytes, not native Linux enum layout",
+  "target_build_performed": false,
+  "running_firmware_identity": "UNKNOWN"
+}

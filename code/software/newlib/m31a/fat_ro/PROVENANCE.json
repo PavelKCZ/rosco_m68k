@@ -1,0 +1,56 @@
+{
+  "repository_head": "9881e9e0f53ba5888887eaa91ddc982521ea8e89",
+  "last_sdfat_commit": "49320f81922976a65ea90bb70eaba3b2f847b18b",
+  "origin": "Local rosco_m68k libsdfat / ultraembedded fat_io_lib; exact upstream revision UNKNOWN",
+  "files": [
+    {
+      "original": "code/software/libs/src/sdfat/fat_io_lib/fat_access.c",
+      "reference": "reference/fat_io_lib/fat_access.c",
+      "sha256": "cd5b5be208c452ac0412fdc7fa8433e25b0b3402af0fa0a954344c032db06ec0",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/fat_io_lib/fat_table.c",
+      "reference": "reference/fat_io_lib/fat_table.c",
+      "sha256": "bc6c4f377b87266724abaf14955ed7c515af92e8fd76e9b58cdb8384b02e80ec",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/fat_io_lib/fat_filelib.c",
+      "reference": "reference/fat_io_lib/fat_filelib.c",
+      "sha256": "d12442382f6bed076b8738c57d1e31138ae2d381ca6c4527119da7e4d6a39c65",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/include/fat_defs.h",
+      "reference": "reference/include/fat_defs.h",
+      "sha256": "a80caaba70f5d8da3b5acec9eda7790ca78865a8db1630d8458788541f2cd354",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/include/fat_types.h",
+      "reference": "reference/include/fat_types.h",
+      "sha256": "145c379b5d427bf736a33a6003e451350015951d4cf9e606aed3129b79bf34e2",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/include/fat_opts.h",
+      "reference": "reference/include/fat_opts.h",
+      "sha256": "e95b72c90889f889f1d94112b1080cf41a2b9dba579192e1529f16e5aa57aa55",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/include/fat_custom.h",
+      "reference": "reference/include/fat_custom.h",
+      "sha256": "1df42f68adea9fdca80b7714e9a8a9f25e5dd8f5f69bf77cc2cda1ee47d4987d",
+      "compiled": false
+    },
+    {
+      "original": "code/software/libs/src/sdfat/fat_io_lib/LICENSE",
+      "reference": "reference/fat_io_lib/LICENSE",
+      "sha256": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+      "compiled": false
+    }
+  ],
+  "derivation": "src/fat_ro.c is a pruned, corrected RO derivative of fatfs_init, fatfs_lba_of_cluster, fatfs_find_next_cluster, directory lookup and fl_fread from the recorded local files. It uses copied fat_defs.h offsets/attributes and fat_types.h. Legacy caches, mutation functions, mode parser and handles are not compiled. reference/ preserves unchanged originals for audit, NOT a link input."
+}

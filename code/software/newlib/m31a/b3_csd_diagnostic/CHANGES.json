@@ -1,0 +1,49 @@
+{
+  "baseline_file_count": 2412,
+  "modified": [
+    {
+      "path": "code/software/newlib/m31a/sd_ro/src/csd_decode.c",
+      "before": "b6d40d71cd2d6350fc7c1b28b5737632536911d9443a82d85191e5be880536f8",
+      "after": "efc8ff0f02896d082df1080b7f313eda03106510b7dc258e1a9cdef234d49b46"
+    },
+    {
+      "path": "code/software/newlib/m31a/sd_ro/src/private.h",
+      "before": "971920dc04c757c4090dd9dca827e5c1e7885650795d7f558c661d0d02ec690e",
+      "after": "0e6f7e96eae75dac849c6a4c84735c247cac6a7cc6290b95ff779bcb852cdb5e"
+    },
+    {
+      "path": "code/software/newlib/m31a/sd_ro/src/sd_ro.c",
+      "before": "60bb2f25d7a8a99ee8a2eb013bc73fa05126ff3fc5fcaf0f55735b3a8690c660",
+      "after": "da2f4e6daa967c431a52224166e9efbc94f83762e2edd2ff72d555f9261fe271"
+    },
+    {
+      "path": "code/software/newlib/m31a/b3_integration/src/b3_integration.c",
+      "before": "b1f5c07478e93fb8a9e3d64503fbc83eb2fd4132f7d4f42a521193af6178646c",
+      "after": "bdc81bce66f0420f83a67920c67b061e4878043eb658cc76077c7f585478a9e6"
+    },
+    {
+      "path": "code/software/newlib/m31a/b3_executable/src/smoke.c",
+      "before": "be87272ec38dce67cebb76faba7803b8edec6c5cf45808e104cfb2651cca5e62",
+      "after": "33f6c5ee717d3d1ea3e883e1e18f2863cc58144f34101e3ade5cd83a8a8fcee5"
+    }
+  ],
+  "new_files_except_this_index": [
+    "code/software/newlib/m31a/b3_csd_diagnostic/PROVENANCE.json",
+    "code/software/newlib/m31a/b3_csd_diagnostic/README.md",
+    "code/software/newlib/m31a/b3_csd_diagnostic/REPORT.md",
+    "code/software/newlib/m31a/b3_csd_diagnostic/SHA256SUMS",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tests/test_application.c",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tests/test_diagnostics.c",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tools/audit.py",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tools/build.py",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tools/negative_audit.py",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tools/negative_cases.json",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tools/profile.py",
+    "code/software/newlib/m31a/b3_csd_diagnostic/tools/validate_host.py",
+    "code/software/newlib/m31a/b3_executable/src/csd_format.h",
+    "code/software/newlib/m31a/b3_integration/include/b3_csd_diag.h",
+    "code/software/newlib/m31a/sd_ro/include/sd_ro_csd_diag.h"
+  ],
+  "baseline_inventory": "/tmp/kilo-h1-d2-i1-4kwrjxj_/baseline.json",
+  "original_manifest_policy": "Historical B2/B3/executable manifests and reports unchanged. New profile pins the modified inputs; historical source manifests no longer describe current source."
+}

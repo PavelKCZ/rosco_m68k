@@ -1,0 +1,13 @@
+{
+  "status": "TEMPLATE ONLY — NOT REVIEWED — NOT ACCEPTANCE EVIDENCE",
+  "elf_sha256": "REPLACE_AFTER_AUTHORIZED_BUILD",
+  "bin_sha256": "REPLACE_AFTER_AUTHORIZED_BUILD",
+  "reviewer": "",
+  "notes": "",
+  "checks": {
+    "mc68010_instructions": "NOT REVIEWED",
+    "stack_irq_budget": "NOT REVIEWED",
+    "firmware_abi_assumptions": "NOT REVIEWED",
+    "b3_memory_budget": "NOT REVIEWED"
+  }
+}

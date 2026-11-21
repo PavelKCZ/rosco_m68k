@@ -1,0 +1,16 @@
+[
+  {"name":"missing_expected_provider", "mutation":"owner", "expected":"OWNER:main"},
+  {"name":"duplicate_syscall_input", "mutation":"duplicate", "expected":"OBJECT_INVENTORY"},
+  {"name":"legacy_fat_input", "mutation":"legacy", "expected":"LINK_INPUTS"},
+  {"name":"sd_write_selector", "mutation":"selector", "expected":"WRAPPER_BODY:sdro_fw_read"},
+  {"name":"odd_wrapper_entry", "mutation":"odd", "expected":"WRAPPER_ODD:sdro_fw_read"},
+  {"name":"wrong_load_delta", "mutation":"delta", "expected":"LOAD_DELTA"},
+  {"name":"bad_image_size", "mutation":"image", "expected":"IMAGE_BOUNDARY"},
+  {"name":"rwx_segment", "mutation":"rwx", "expected":"LOAD_PERMISSIONS"},
+  {"name":"executable_stack", "mutation":"stack", "expected":"GNU_STACK"},
+  {"name":"bin_disagreement", "mutation":"bin", "expected":"BIN_BYTES:"},
+  {"name":"missing_object_hash", "mutation":"missing_hash", "expected":"OBJECT_HASH:"},
+  {"name":"mismatched_object_hash", "mutation":"bad_hash", "expected":"OBJECT_HASH:"},
+  {"name":"unresolved_symbol", "mutation":"unresolved", "expected":"UNRESOLVED_SYMBOLS"},
+  {"name":"missing_manual_gate", "mutation":"manual", "expected":"MANUAL_REQUIRED"}
+]
